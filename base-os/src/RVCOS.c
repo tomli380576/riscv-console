@@ -5,6 +5,7 @@ volatile char *VIDEO_MEMORY = (volatile char *)(0x50000000 + 0xFE800);
 volatile uint32_t *main_gp = 0;
 
 TCB **global_tcb_arr;
+uint32_t tcb_arr_size = 0;
 
 PriorityQueue *low_prio;
 PriorityQueue *med_prio;
@@ -16,22 +17,24 @@ volatile uint32_t last_write_pos = 0;
 volatile uint32_t running_thread_id = 1;
 
 uint32_t call_on_other_gp(void *param, TEntry entry, uint32_t *gp);
+void ContextSwitch(volatile uint32_t **oldsp, volatile uint32_t *newsp);
 void thread_skeleton(uint32_t thread);
 
 void thread_skeleton(uint32_t thread)
 {
-
+  WriteString("skeleton called\n");
   // Do any setup for making tp = thread_id
   asm volatile("csrsi mstatus, 0x8"); // enable interrupts
-
   // call entry(param) but make sure to switch the gp right before the call
-
+  global_tcb_arr[running_thread_id]->state = RVCOS_THREAD_STATE_RUNNING;
   uint32_t ret_val = call_on_other_gp(global_tcb_arr[thread]->param, global_tcb_arr[thread]->entry, main_gp);
   RVCThreadTerminate(thread, ret_val);
 }
 
 void schedule()
 {
+
+  WriteString("Scheduler\n");
   uint32_t old_id = running_thread_id;
   uint32_t new_id = 0;
   if (high_prio->size > 0)
@@ -51,9 +54,13 @@ void schedule()
   }
   else
   {
+    WriteString("to idle\n");
     running_thread_id = 0; // goto idle
   }
-  ContextSwitch(global_tcb_arr[old_id]->sp, global_tcb_arr[new_id]->sp);
+  WriteString("try to switch\n");
+  ContextSwitch(&(global_tcb_arr[old_id]->sp), global_tcb_arr[new_id]->sp);
+  WriteString("back\n");
+  // thread_skeleton(running_thread_id);
 }
 
 /**
@@ -87,6 +94,12 @@ void idleFunction()
   }
 }
 
+/**
+ * @brief Traverses the TCB array to get the first available index
+ *
+ * @return uint32_t index
+ * @return -1 TCB is full
+ */
 uint32_t getNextAvailableTCBIndex()
 {
   WriteString("next available: ");
@@ -104,7 +117,24 @@ uint32_t getNextAvailableTCBIndex()
   return -1; // no available slots
 }
 
-// TODO check the order here
+void resizeTCB()
+{
+  uint32_t new_size = tcb_arr_size * 2;
+  TCB **new_arr = (TCB **)malloc(sizeof(TCB *) * new_size);
+  for (int i = 0; i < tcb_arr_size; i++)
+  {
+    new_arr[i] = global_tcb_arr[i];
+  }
+  free(global_tcb_arr);
+  global_tcb_arr = new_arr;
+}
+
+/**
+ * @brief Returns the Priority Queue pointer given PQ number
+ *
+ * @param prio_num
+ * @return PriorityQueue*
+ */
 PriorityQueue *getPQByPrioNum(uint32_t prio_num)
 {
   switch (prio_num)
@@ -123,7 +153,46 @@ PriorityQueue *getPQByPrioNum(uint32_t prio_num)
   }
 }
 
-// ! change the logic of queues here
+/**
+ * @brief
+ *
+ * @param sp
+ * @param function
+ * @param param
+ * @param tp
+ * @return uint32_t* the initialized sp
+ */
+uint32_t *InitStack(uint32_t *sp, TEntry function, uint32_t param, uint32_t tp)
+{
+  sp--;
+  *sp = (uint32_t)function; // sw      ra,48(sp)
+  sp--;
+  *sp = tp; // sw      tp,44(sp)
+  sp--;
+  *sp = 0; // sw      t0,40(sp)
+  sp--;
+  *sp = 0; // sw      t1,36(sp)
+  sp--;
+  *sp = 0; // sw      t2,32(sp)
+  sp--;
+  *sp = 0; // sw      s0,28(sp)
+  sp--;
+  *sp = 0; // sw      s1,24(sp)
+  sp--;
+  *sp = param; // sw      a0,20(sp)
+  sp--;
+  *sp = 0; // sw      a1,16(sp)
+  sp--;
+  *sp = 0; // sw      a2,12(sp)
+  sp--;
+  *sp = 0; // sw      a3,8(sp)
+  sp--;
+  *sp = 0; // sw      a4,4(sp)
+  sp--;
+  *sp = 0; // sw      a5,0(sp)
+  return sp;
+}
+
 TStatus RVCInitialize(uint32_t *gp)
 {
   if (!gp)
@@ -133,7 +202,7 @@ TStatus RVCInitialize(uint32_t *gp)
   main_gp = gp;
 
   WriteString("try to init\n");
-  global_tcb_arr = malloc(sizeof(TCB *) * 256); // TODO: remove 256 cap
+  global_tcb_arr = malloc(sizeof(TCB *) * 256); // TODO: remove 256 cap or add array dup function
   WriteInt(global_tcb_arr);
   WriteString("\n");
   for (uint32_t i = 0; i < 256; i++)
@@ -141,7 +210,6 @@ TStatus RVCInitialize(uint32_t *gp)
     global_tcb_arr[i] = NULL;
   } // manual calloc
 
-  // TODO: change all of this to linked list implementation
   // Init all PQs
   low_prio = (PriorityQueue *)malloc(sizeof(PriorityQueue));
   med_prio = (PriorityQueue *)malloc(sizeof(PriorityQueue));
@@ -152,27 +220,27 @@ TStatus RVCInitialize(uint32_t *gp)
   low_prio->tail = med_prio->tail = high_prio->tail = idle_prio->tail = NULL;
   low_prio->size = med_prio->size = high_prio->size = idle_prio->size = 0;
 
-  WriteString("Low prio pointer: ");
-  WriteInt((uint32_t)low_prio);
-  WriteString("\n");
+  // WriteString("Low prio pointer: ");
+  // WriteInt((uint32_t)low_prio);
+  // WriteString("\n");
+
   // Creating IDLE thread and IDLE thread TCB
   uint32_t *idle_tid = malloc(sizeof(uint32_t));
-  // create handles putting it in TCB[]
   RVCThreadCreate(idleFunction, NULL, 1024, RVCOS_THREAD_PRIORITY_IDLE, idle_tid);
   free(idle_tid);
-  WriteString("made idle thread");
+  // WriteString("made idle thread");
 
   // Creating MAIN thread and MAIN thread TCB manually because it's a special case
   TCB *main_thread_tcb = malloc(sizeof(TCB));
   main_thread_tcb->thread_id = MAIN_THREAD_ID;
-  
-  WriteString("main id: ");
-  WriteInt(main_thread_tcb->thread_id);
-  WriteString("\n");
+
+  // WriteString("main id: ");
+  // WriteInt(main_thread_tcb->thread_id);
+  // WriteString("\n");
 
   main_thread_tcb->state = RVCOS_THREAD_STATE_RUNNING;
   main_thread_tcb->sp = 0x71000000;     // top of physical stack
-  main_thread_tcb->mem_size = 0xE00000; //? is this 14MB
+  main_thread_tcb->mem_size = 0xE00000; //? is this 14MB //
   main_thread_tcb->priority = 2;
 
   global_tcb_arr[1] = main_thread_tcb;
@@ -213,12 +281,6 @@ TStatus RVCThreadDelete(TThreadID thread)
 
 TStatus RVCThreadCreate(TThreadEntry entry, void *param, TMemorySize memsize, TThreadPriority prio, TThreadIDRef tid)
 {
-  if (!tid)
-  {
-    WriteInt(tid);
-    WriteString("bad tid\n");
-  }
-
   if (!entry || !tid)
   {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
@@ -234,8 +296,10 @@ TStatus RVCThreadCreate(TThreadEntry entry, void *param, TMemorySize memsize, TT
   curr_thread_tcb->param = param;
 
   *tid = getNextAvailableTCBIndex();
-  WriteString("tid is: ");
-  WriteInt(*tid);
+
+  // WriteString("tid is: ");
+  // WriteInt(*tid);
+
   if (*tid == -1)
   {
     return RVCOS_STATUS_FAILURE;
@@ -258,28 +322,38 @@ TStatus RVCThreadActivate(TThreadID thread)
    *
    */
 
-  char *thread_text[100];
-
+  WriteInt(thread);
+  WriteString("\n");
   if (global_tcb_arr[thread] == NULL)
   {
+    WriteString("invalid id\n");
     return RVCOS_STATUS_ERROR_INVALID_ID;
   }
 
   uint32_t state = global_tcb_arr[thread]->state;
-  if (state == RVCOS_THREAD_STATE_CREATED || state == RVCOS_THREAD_STATE_DEAD)
+  if (state == RVCOS_THREAD_STATE_DEAD)
   {
+    WriteString("invalid state\n");
     return RVCOS_STATUS_ERROR_INVALID_STATE;
   }
 
-  global_tcb_arr[thread]->sp = malloc(global_tcb_arr[thread]->mem_size);
-
+  // global_tcb_arr[thread]->sp = malloc(global_tcb_arr[thread]->mem_size);
+  InitStack(global_tcb_arr[thread]->sp + global_tcb_arr[thread]->mem_size,
+    global_tcb_arr[thread]->entry,
+    global_tcb_arr[thread]->param, 
+    thread);
   global_tcb_arr[thread]->state = RVCOS_THREAD_STATE_READY;
 
-  uint32_t tid;
-  dequeue(getPQByPrioNum(global_tcb_arr[thread]->priority), &tid);
-  //  set thread to STATUS_RUNNING
-  running_thread_id = tid;
-  // TODO  run thread from entry point
+  // uint32_t tid;
+  // dequeue(getPQByPrioNum(global_tcb_arr[thread]->priority), &tid);
+  // //enqueue(wait_q, &running_thread_id);
+
+  // running_thread_id = tid;
+
+  WriteString("before schedule\n");
+  // TODO call the skeleton function here
+  schedule();
+  thread_skeleton(running_thread_id);
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -315,7 +389,7 @@ TStatus RVCThreadTerminate(TThreadID thread, TThreadReturn returnval)
 TStatus RVCWriteText(const TTextCharacter *buffer, TMemorySize writesize)
 {
   const uint32_t stat = 0;
-  uint32_t n_pos = 0;
+  uint32_t n_pos = 0; // the last \n index
   uint32_t physical_write_pos = last_write_pos;
 
   for (uint32_t j = 0; j < writesize; j++)
@@ -362,8 +436,9 @@ TStatus RVCThreadState(TThreadID thread, TThreadStateRef state)
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
 
-  WriteString("the running thread state is: ");
-  WriteInt(global_tcb_arr[thread]->state);
+  // WriteString("the running thread state is: ");
+  // WriteInt(global_tcb_arr[thread]->state);
+  // WriteString("\n");
   *state = global_tcb_arr[thread]->state;
   return RVCOS_STATUS_SUCCESS;
 }

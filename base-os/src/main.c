@@ -14,10 +14,7 @@ typedef void (*TFunctionPointer)(void);
 
 // Assembly functions
 void enter_cartridge(void);
-void ContextSwitch(volatile uint32_t **oldsp, volatile uint32_t *newsp);
 uint32_t *InitStack(uint32_t *sp, TEntry fun, uint32_t param, uint32_t tp);
-
-
 
 int main() {
   saved_sp = &controller_status;
@@ -113,42 +110,3 @@ uint32_t c_syscall_handler(uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4, u
   return syscall_code + 1; // plus 1 just to make a change
 }
 
-/**
- * @brief 
- * 
- * @param sp 
- * @param function 
- * @param param 
- * @param tp 
- * @return uint32_t* the initialized sp
- */
-uint32_t *InitStack(uint32_t *sp, TEntry function, uint32_t param, uint32_t tp)
-{
-  sp--;
-  *sp = (uint32_t)thread_skeleton; // sw      ra,48(sp)
-  sp--;
-  *sp = tp; // sw      tp,44(sp)
-  sp--;
-  *sp = 0; // sw      t0,40(sp)
-  sp--;
-  *sp = 0; // sw      t1,36(sp)
-  sp--;
-  *sp = 0; // sw      t2,32(sp)
-  sp--;
-  *sp = 0; // sw      s0,28(sp)
-  sp--;
-  *sp = 0; // sw      s1,24(sp)
-  sp--;
-  *sp = param; // sw      a0,20(sp)
-  sp--;
-  *sp = 0; // sw      a1,16(sp)
-  sp--;
-  *sp = 0; // sw      a2,12(sp)
-  sp--;
-  *sp = 0; // sw      a3,8(sp)
-  sp--;
-  *sp = 0; // sw      a4,4(sp)
-  sp--;
-  *sp = 0; // sw      a5,0(sp)
-  return sp;
-}
