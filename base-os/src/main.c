@@ -168,8 +168,52 @@ void c_syscall_handler(uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4, uint3
     RVCMutexRelease(p1);
     break;
   }
-  default:
+  case 23:{
+    RVCChangeVideoMode(p1);
     break;
+  }
+  // case 24:{
+  //   RVCSetVideoUpcall(p1, p2);
+  //   break;
+  // }
+  // case 25:{
+  //   RVCGraphicCreate(p1, p2);
+  //   break;
+  // }
+  // case 26:{
+  //   RVCGraphicDelete(p1);
+  //   break;
+  // }
+  // case 27:{
+  //   RVCGraphicActivate(p1, p2, p3, p4);
+  //   break;
+  // }
+  // case 28:{
+  //   RVCGraphicActivate(p1, p2, p3, p4);
+  //   break;
+  // }
+  // case 29:{
+  //   RVCGraphicDeactivate(p1);
+  //   break;
+  // }
+  // case 30:{
+  //   RVCGraphicDraw(p1, p2, p3, p4, p5);
+  //   break;
+  // }
+  // case 31:{
+  //   RVCPaletteCreate(p1);
+  //   break;
+  // }
+  // case 32:{
+  //   RVCPaletteDelete(p1);
+  //   break;
+  // }
+  // case 33:{
+  //   RVCPaletteUpdate(p1, p2, p3, p4);
+  //   break;
+  // }
+
+  default: break;
   }
 }
 

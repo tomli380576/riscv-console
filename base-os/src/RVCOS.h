@@ -41,6 +41,18 @@
 #define RVCOS_MUTEX_STATE_LOCKED ((TMutexState)0x00)
 #define RVCOS_MUTEX_STATE_UNLOCKED ((TMutexState)0x01)
 
+#define RVCOS_VIDEO_MODE_TEXT      ((TVideoMode)0) 
+#define RVCOS_VIDEO_MODE_GRAPHICS  ((TVideoMode)1) 
+
+#define RVCOS_GRAPHIC_ID_INVALID                    ((TGraphicID)-1)
+
+#define RVCOS_GRAPHIC_TYPE_FULL                     ((TGraphicType)0)
+#define RVCOS_GRAPHIC_TYPE_LARGE                    ((TGraphicType)1)
+#define RVCOS_GRAPHIC_TYPE_SMALL                    ((TGraphicType)2)
+
+#define RVCOS_PALETTE_ID_DEFAULT                    ((TPaletteID)0)
+#define RVCOS_PALETTE_ID_INVALID                    ((TPaletteID)-1)
+
 #define TIME_REG (*(volatile uint32_t *)0x40000008)           // already derefed, ready to use as value
 #define CONTROLLER_REG_VAL (*(volatile uint32_t *)0x40000018) // already derefed
 #define MAX_VRAM_INDEX (36 * 64 - 1)
@@ -82,19 +94,6 @@ typedef struct
     uint32_t DReserved : 24; // 24 bit field
 } SControllerStatus, * SControllerStatusRef;
 
-
-typedef struct{
-    uint32_t DLeft:1;
-    uint32_t DUp:1;
-    uint32_t DDown:1;
-    uint32_t DRight:1;
-    uint32_t DButton1:1;
-    uint32_t DButton2:1;
-    uint32_t DButton3:1;
-    uint32_t DButton4:1;
-    uint32_t DReserved:24;
-} SControllerStatus, *SControllerStatusRef;
-
 typedef struct{
     int32_t DXPosition;
     int32_t DYPosition;
@@ -113,8 +112,36 @@ typedef struct{
     uint32_t DAlpha : 8;
 } SColor, *SColorRef;
 
+typedef struct {
+    uint32_t DPalette : 2;
+    uint32_t DXOffset : 10;
+    uint32_t DYOffset : 9;
+    uint32_t DWidth : 5;
+    uint32_t DHeight : 5;
+    uint32_t DReserved : 1;
+} SLargeSpriteControl, *SLargeSpriteControlRef;
 
-typedef char Byte;
+typedef struct {
+    uint32_t DPalette : 2;
+    uint32_t DXOffset : 10;
+    uint32_t DYOffset : 9;
+    uint32_t DWidth : 4;
+    uint32_t DHeight : 4;
+    uint32_t DZ : 3;
+} SSmallSpriteControl, * SSmallSpriteControlRef;
+typedef struct {
+    uint32_t DPalette : 2;
+    uint32_t DXOffset : 10;
+    uint32_t DYOffset : 10;
+    uint32_t DZ : 3;
+    uint32_t DReserved : 7;
+} SBackgroundControl, *SBackgroundControlRef;
+
+typedef struct {
+    uint32_t DMode : 1;
+    uint32_t DRefresh : 7;
+    uint32_t DReserved : 24;
+} SVideoControllerMode, *SVideoControllerModeRef;
 
 TStatus RVCInitialize(uint32_t* gp);
 

@@ -3,14 +3,24 @@
 #include "esc_codes.h"
 #include "queues.h"
 
-volatile char* VIDEO_MEMORY = (volatile char*)(0x50000000 + 0xFE800);
+volatile char* TEXT_VIDEO_MEMORY = (volatile char*)(0x50000000 + 0xFE800);
 volatile uint32_t* main_gp = 0;
 volatile uint32_t PQ_ready = 0;
 
+volatile uint8_t *BackgroundData[5];
+volatile uint8_t *LargeSpriteData[64];
+volatile uint8_t *SmallSpriteData[128];
+
+volatile SColor *BackgroundPalettes[4];
+volatile SColor *SpritePalettes[4];
+volatile SBackgroundControl *BackgroundControls = (volatile SBackgroundControl *)0x500FF100;
+volatile SLargeSpriteControl *LargeSpriteControls = (volatile SLargeSpriteControl *)0x500FF114;
+volatile SSmallSpriteControl *SmallSpriteControls = (volatile SSmallSpriteControl *)0x500FF214;
+volatile SVideoControllerMode *ModeControl = (volatile SVideoControllerMode *)0x500FF414;
+
 TCB** global_tcb_arr = NULL;
 MemoryPoolController* global_mem_pool_arr = NULL;  // TODO change the 10
-MUTEX** global_mutex_arr;  // each mutex is const size, consider using only 1
-                           // pointer
+MUTEX** global_mutex_arr;  // each mutex is const size, consider using only 1 pointer
 
 uint32_t curr_available_mem_pool_index = 0;
 uint32_t curr_TCB_max_size = 256;
@@ -23,13 +33,12 @@ PriorityQueue* wait_q;
 
 volatile uint32_t last_write_pos = 0;
 volatile uint32_t running_thread_id = 1;
-// volatile uint32_t next_thread_to_run = -1;
 
 uint32_t call_on_other_gp(void* param, TEntry entry, uint32_t* gp);
 void ContextSwitch(volatile uint32_t** oldsp, volatile uint32_t* newsp);
 uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp);
 void CallUpcall(void *param, TUpcallPointer upcall, uint32_t *gp, uint32_t *sp);
-
+void InitPointers(void);
 
 /**
  * @brief Thread Scheduler, only call this through timer interrupt OR thread
@@ -38,8 +47,7 @@ void CallUpcall(void *param, TUpcallPointer upcall, uint32_t *gp, uint32_t *sp);
 void schedule() {
   uint32_t old_id = running_thread_id;
   uint32_t new_id = -1;
-  // writeInt(high_prio->size);
-  // writeString("\n");
+
   if (high_prio->size > 0) {
     dequeue(high_prio, &new_id);
     writeString("high deq: ");
@@ -76,18 +84,8 @@ void schedule() {
 
 void threadSkeleton() {
   asm volatile("csrsi mstatus, 0x8");  // enable interrupts
-
-  // call entry(param) but make sure to switch the gp right before the call
-  writeString("calling on GP: ");
-  writeInt(main_gp);  //? always OS GP?
-  writeString("\n");
-  writeString("the thread is: ");
-  writeInt(running_thread_id);  // the param isn't right
-  writeString("\n");
-
   global_tcb_arr[running_thread_id]->state = RVCOS_THREAD_STATE_RUNNING;
-  uint32_t ret_val =
-      call_on_other_gp(global_tcb_arr[running_thread_id]->param,
+  uint32_t ret_val = call_on_other_gp(global_tcb_arr[running_thread_id]->param,
                        global_tcb_arr[running_thread_id]->entry, main_gp);
   writeString("came back\n");  // The thread did finish
   RVCThreadTerminate(running_thread_id, ret_val);
@@ -285,29 +283,19 @@ TStatus RVCThreadActivate(TThreadID thread) {
    */
 
   if (global_tcb_arr[thread] == NULL) {
-    writeString("bad thread");
     return RVCOS_STATUS_ERROR_INVALID_ID;
   }
   uint32_t state = global_tcb_arr[thread]->state;
   if (!(state == RVCOS_THREAD_STATE_CREATED ||
         state == RVCOS_THREAD_STATE_DEAD)) {
-    writeInt(state);
-    writeString(" is bad state\n");
     return RVCOS_STATUS_ERROR_INVALID_STATE;
   }
 
   global_tcb_arr[thread]->sp = malloc(global_tcb_arr[thread]->mem_size);
   global_tcb_arr[thread]->state = RVCOS_THREAD_STATE_READY;
 
-  global_tcb_arr[thread]->sp =
-      initStack(global_tcb_arr[thread]->sp, threadSkeleton,
+  global_tcb_arr[thread]->sp = initStack(global_tcb_arr[thread]->sp, threadSkeleton,
                 global_tcb_arr[thread]->param, thread);
-
-  writeInt(running_thread_id);
-  writeString(" is old thread\n");
-
-  writeInt(global_tcb_arr[running_thread_id]->sp);
-  writeString(" is old sp\n");
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -325,8 +313,6 @@ TStatus RVCThreadTerminate(TThreadID thread, TThreadReturn returnval) {
   global_tcb_arr[thread]->state = RVCOS_THREAD_STATE_DEAD;
   returnval = global_tcb_arr[thread]->ret_val;
 
-  // TODO: context switch back
-  writeString("context switch to main\n");
   ContextSwitch(&(global_tcb_arr[running_thread_id]->sp),
                 global_tcb_arr[MAIN_THREAD_ID]->sp);
   running_thread_id = MAIN_THREAD_ID;
@@ -429,7 +415,7 @@ TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize) {
           case 2: {
             RVCWriteText("\b ", 2);
             if (last_write_pos == 0) {
-              VIDEO_MEMORY[0] = ' ';
+              TEXT_VIDEO_MEMORY[0] = ' ';
               last_write_pos = 64;
             } else {
               last_write_pos = (physical_write_pos + 63) % MAX_VRAM_INDEX;
@@ -457,7 +443,7 @@ TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize) {
           case 6: {
             writeString("2: Erase screen, leave cursor");
             for (int h = 0; h < MAX_VRAM_INDEX; h++) {
-              VIDEO_MEMORY[h] = '\0';
+              TEXT_VIDEO_MEMORY[h] = '\0';
             }
             RVCWriteText("X", 1);
             break;
@@ -479,7 +465,7 @@ TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize) {
                                ? physical_write_pos - 2
                                : 0;  // make sure writepos is always >=0
     }
-    VIDEO_MEMORY[physical_write_pos++] = buffer[j];
+    TEXT_VIDEO_MEMORY[physical_write_pos++] = buffer[j];
   }
 
   // change this line to change the behavior of writing to a filled screen/
@@ -524,8 +510,7 @@ TStatus RVCThreadSleep(TTick tick) { return RVCOS_STATUS_SUCCESS; }
 
 TStatus RVCTickMS(uint32_t* tickmsref) {
   if (tickmsref) {
-    uint32_t time = TIME_REG * 1000;
-    *tickmsref = time;
+    *tickmsref = 5;
     return RVCOS_STATUS_SUCCESS;
   } else {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
@@ -534,11 +519,9 @@ TStatus RVCTickMS(uint32_t* tickmsref) {
   return RVCOS_STATUS_SUCCESS;
 }
 
-//? what does this function do?
 TStatus RVCTickCount(TTickRef tickref) {
   if (tickref) {
-    uint32_t time = TIME_REG;
-    *tickref = time;
+    *tickref = TIME_REG / 5;
     return RVCOS_STATUS_SUCCESS;
   } else {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
@@ -631,8 +614,7 @@ TStatus RVCMemoryPoolQuery(TMemoryPoolID memory, TMemorySizeRef bytesleft) {
  * This assumes memory is a already initialized mem pool except when
  * memory == 0
  */
-TStatus RVCMemoryPoolAllocate(TMemoryPoolID memory, TMemorySize size,
-                              void** pointer) {
+TStatus RVCMemoryPoolAllocate(TMemoryPoolID memory, TMemorySize size, void** pointer) {
   if (memory < 0) {
     return RVCOS_STATUS_ERROR_INVALID_ID;
   }
@@ -662,8 +644,7 @@ TStatus RVCMemoryPoolAllocate(TMemoryPoolID memory, TMemorySize size,
     if (curr_chunk->isFree && curr_chunk->data_size >= actual_alloc_size) {
       // mark current as an occupied chunk
       curr_chunk->isFree = 0;
-      *pointer = curr_chunk +
-                 sizeof(MemoryChunk);  // move offset to actual mem location
+      *pointer = curr_chunk + sizeof(MemoryChunk);  // move offset to actual mem location
 
       // now make the free chunk
       // ! chueck if it's in bounds
@@ -814,6 +795,16 @@ TStatus RVCMutexRelease(TMutexID mutex) {
   return RVCOS_STATUS_SUCCESS;
 }
 
+TStatus RVCChangeVideoMode(TVideoMode mode){
+  if (mode != RVCOS_VIDEO_MODE_TEXT && mode != RVCOS_VIDEO_MODE_GRAPHICS){
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+  ModeControl->DMode ^= 1;
+  return RVCOS_STATUS_SUCCESS;
+}
+
+
+
 /**
  * @brief
  *
@@ -823,8 +814,7 @@ TStatus RVCMutexRelease(TMutexID mutex) {
  * @param tp
  * @return uint32_t* the initialized sp
  */
-uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param,
-                    uint32_t tp) {
+uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp) {
   sp--;
   *sp = (uint32_t)function;  // sw      ra,48(sp)
   sp--;
@@ -860,3 +850,24 @@ uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param,
  * @return uint32_t
  */
 uint32_t getPQReady() { return PQ_ready; }
+
+
+/**
+ * @brief From Discussion code
+ * 
+ */
+void InitPointers(void){
+    for(int Index = 0; Index < 4; Index++){
+        BackgroundPalettes[Index] = (volatile SColor *)(0x500FC000 + 256 * sizeof(SColor) * Index);
+        SpritePalettes[Index] = (volatile SColor *)(0x500FD000 + 256 * sizeof(SColor) * Index);
+    }
+    for(int Index = 0; Index < 5; Index++){
+        BackgroundData[Index] = (volatile uint8_t *)(0x50000000 + 512 * 288 * Index);
+    }
+    for(int Index = 0; Index < 64; Index++){
+        LargeSpriteData[Index] = (volatile uint8_t *)(0x500B4000 + 64 * 64 * Index);
+    }
+    for(int Index = 0; Index < 128; Index++){
+        SmallSpriteData[Index] = (volatile uint8_t *)(0x500F4000 + 16 * 16 * Index);
+    }
+}
