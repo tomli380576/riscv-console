@@ -9,7 +9,8 @@ volatile uint32_t PQ_ready = 0;
 
 TCB** global_tcb_arr = NULL;
 MemoryPoolController* global_mem_pool_arr = NULL;  // TODO change the 10
-MUTEX** global_mutex_arr; // each mutex is const size, consider using only 1 pointer
+MUTEX** global_mutex_arr;  // each mutex is const size, consider using only 1
+                           // pointer
 
 uint32_t curr_available_mem_pool_index = 0;
 uint32_t curr_TCB_max_size = 256;
@@ -28,28 +29,10 @@ uint32_t call_on_other_gp(void* param, TEntry entry, uint32_t* gp);
 void ContextSwitch(volatile uint32_t** oldsp, volatile uint32_t* newsp);
 uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp);
 
-void threadSkeleton() { 
-  asm volatile("csrsi mstatus, 0x8");  // enable interrupts
-
-  // call entry(param) but make sure to switch the gp right before the call
-  writeString("calling on GP: ");
-  writeInt(main_gp); //? always OS GP?
-  writeString("\n");
-  writeString("the thread is: ");
-  writeInt(running_thread_id); // the param isn't right
-  writeString("\n");
-
-  global_tcb_arr[running_thread_id]->state = RVCOS_THREAD_STATE_RUNNING;
-  uint32_t ret_val = call_on_other_gp(global_tcb_arr[running_thread_id]->param,
-                                      global_tcb_arr[running_thread_id]->entry, main_gp);
-  writeString("came back\n");// The thread did finish
-  RVCThreadTerminate(running_thread_id, ret_val);
-}
 
 /**
  * @brief Thread Scheduler, only call this through timer interrupt OR thread
- * terminate 
- * ! Remove the parameter
+ * terminate
  */
 void schedule() {
   uint32_t old_id = running_thread_id;
@@ -59,33 +42,54 @@ void schedule() {
   if (high_prio->size > 0) {
     dequeue(high_prio, &new_id);
     writeString("high deq: ");
-    writeInt(new_id);
-    writeString("\n");
-    running_thread_id = new_id;
   } else if (med_prio->size > 0) {
-    writeString("med deq: ");
     dequeue(med_prio, &new_id);
-    running_thread_id = new_id;
+    writeString("med deq: ");
   } else if (low_prio->size > 0) {
-    writeString("low deq: ");
     dequeue(low_prio, &new_id);
-    running_thread_id = new_id;
+    writeString("low deq: ");
   } else {
-    writeString("no deq\n");
-    running_thread_id = 0;
+    dequeue(idle_prio, &new_id); 
+    writeString("idle deq: ");
   }
+  writeInt(new_id);
+  writeString("\n");
 
-  
-
-  // ! The high prio does get called now, but it's stuck in some sort of loop
-  // ! Change the scheduling algo above
-  if (new_id >= 0){
+  if (new_id >= 0 && new_id != running_thread_id) {
     writeString("try to switch, the new id is: ");
     writeInt(new_id);
     writeString("\n");
+
+    writeString("the old id is: ");
+    writeInt(old_id);
+    writeString("\n");
+
+    running_thread_id = new_id;
     ContextSwitch(&(global_tcb_arr[old_id]->sp), global_tcb_arr[new_id]->sp);
+    if (new_id == 0) {
+      RVCThreadActivate(0);
+    }
   }
   writeString("back\n");
+}
+
+void threadSkeleton() {
+  asm volatile("csrsi mstatus, 0x8");  // enable interrupts
+
+  // call entry(param) but make sure to switch the gp right before the call
+  writeString("calling on GP: ");
+  writeInt(main_gp);  //? always OS GP?
+  writeString("\n");
+  writeString("the thread is: ");
+  writeInt(running_thread_id);  // the param isn't right
+  writeString("\n");
+
+  global_tcb_arr[running_thread_id]->state = RVCOS_THREAD_STATE_RUNNING;
+  uint32_t ret_val =
+      call_on_other_gp(global_tcb_arr[running_thread_id]->param,
+                       global_tcb_arr[running_thread_id]->entry, main_gp);
+  writeString("came back\n");  // The thread did finish
+  RVCThreadTerminate(running_thread_id, ret_val);
 }
 
 /**
@@ -108,6 +112,7 @@ void writeInt(uint32_t val) {
 }
 
 void idleFunction() {
+  writeString("Entered Idle\n");
   asm volatile("csrci mstatus, 0x8");  // enables interrupts
   while (1) {
     ;
@@ -187,10 +192,12 @@ TStatus RVCInitialize(uint32_t* gp) {
   PQ_ready = 1;
 
   uint32_t* idle_tid = malloc(sizeof(uint32_t));
-  RVCThreadCreate(idleFunction, NULL, 1024, RVCOS_THREAD_PRIORITY_IDLE, idle_tid);
+  RVCThreadCreate(idleFunction, NULL, 1024, RVCOS_THREAD_PRIORITY_IDLE,
+                  idle_tid);
   free(idle_tid);
 
-  // Creating MAIN thread and MAIN thread TCB manually because it's a special case
+  // Creating MAIN thread and MAIN thread TCB manually because it's a special
+  // case
   TCB* main_thread_tcb = malloc(sizeof(TCB));
   main_thread_tcb->thread_id = MAIN_THREAD_ID;
 
@@ -232,7 +239,8 @@ TStatus RVCThreadDelete(TThreadID thread) {
  * @return TStatus
  */
 
-TStatus RVCThreadCreate(TThreadEntry entry, void* param, TMemorySize memsize, TThreadPriority prio, TThreadIDRef tid) {
+TStatus RVCThreadCreate(TThreadEntry entry, void* param, TMemorySize memsize,
+                        TThreadPriority prio, TThreadIDRef tid) {
   if (!entry || !tid) {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
@@ -247,7 +255,7 @@ TStatus RVCThreadCreate(TThreadEntry entry, void* param, TMemorySize memsize, TT
   curr_thread_tcb->param = param;
 
   *tid = getNextAvailableTCBIndex();
-  
+
   if (*tid == -1) {
     resizeTCBArray();
     *tid = getNextAvailableTCBIndex();
@@ -280,7 +288,8 @@ TStatus RVCThreadActivate(TThreadID thread) {
     return RVCOS_STATUS_ERROR_INVALID_ID;
   }
   uint32_t state = global_tcb_arr[thread]->state;
-  if (!(state == RVCOS_THREAD_STATE_CREATED || state == RVCOS_THREAD_STATE_DEAD)) {
+  if (!(state == RVCOS_THREAD_STATE_CREATED ||
+        state == RVCOS_THREAD_STATE_DEAD)) {
     writeInt(state);
     writeString(" is bad state\n");
     return RVCOS_STATUS_ERROR_INVALID_STATE;
@@ -291,15 +300,13 @@ TStatus RVCThreadActivate(TThreadID thread) {
 
   global_tcb_arr[thread]->sp =
       initStack(global_tcb_arr[thread]->sp, threadSkeleton,
-                global_tcb_arr[thread]->param, thread); 
+                global_tcb_arr[thread]->param, thread);
 
   writeInt(running_thread_id);
   writeString(" is old thread\n");
 
   writeInt(global_tcb_arr[running_thread_id]->sp);
   writeString(" is old sp\n");
-
-  // schedule(); // * Testing only
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -317,10 +324,10 @@ TStatus RVCThreadTerminate(TThreadID thread, TThreadReturn returnval) {
   global_tcb_arr[thread]->state = RVCOS_THREAD_STATE_DEAD;
   returnval = global_tcb_arr[thread]->ret_val;
 
-
-  // TODO: context switch back 
+  // TODO: context switch back
   writeString("context switch to main\n");
-  ContextSwitch(&(global_tcb_arr[running_thread_id]->sp), global_tcb_arr[MAIN_THREAD_ID]->sp);
+  ContextSwitch(&(global_tcb_arr[running_thread_id]->sp),
+                global_tcb_arr[MAIN_THREAD_ID]->sp);
   running_thread_id = MAIN_THREAD_ID;
 
   // call scheduler here
@@ -846,10 +853,9 @@ uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param,
   return sp;
 }
 /**
- * @brief Prevents the interrupt handler from calling scheduler when PQ aren't ready
- * 
- * @return uint32_t 
+ * @brief Prevents the interrupt handler from calling scheduler when PQ aren't
+ * ready
+ *
+ * @return uint32_t
  */
-uint32_t getPQReady(){
-  return PQ_ready;
-}
+uint32_t getPQReady() { return PQ_ready; }

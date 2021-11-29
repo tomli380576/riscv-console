@@ -28,6 +28,7 @@ int main()
     if (CART_STAT_REG & 0x1)
     {
       enter_cartridge();
+      writeString("back to OS\n");
       while (CART_STAT_REG & 0x1) // wait for the cartridge to be removed
       {
         ;

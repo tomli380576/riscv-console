@@ -84,6 +84,8 @@ void c_interrupt_handler(int p1, int p2, int p3, int p4, int p5) {
   if (getPQReady()){
     schedule();
   }
+
+  //writeString("scheduler finished\n");
   
   csr_enable_interrupts();
 }

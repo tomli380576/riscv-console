@@ -23,14 +23,47 @@ _interrupt_handler:
     mret
 
 # Save MEPC and global pointer before calling c_int_handler, restore afterwards
+# hardware_interrupt:
+#     csrr    ra,mscratch
+#     addi	  sp,sp,-48
+#     csrr    s1,mepc
+#     sw      s1,44(sp)
+#     mv      a5, s1
+#     sw      gp,40(sp)
+#     sw	    ra,36(sp) ## sp[36/4] = ra
+#     sw	    t0,32(sp)
+#     sw	    t1,28(sp)
+#     sw	    t2,24(sp)
+#     sw	    a0,20(sp)
+#     sw	    a1,16(sp)
+#     sw	    a2,12(sp)
+#     sw	    a3,8(sp)
+#     sw	    a4,4(sp)
+#     sw	    a5,0(sp)
+#     call    c_interrupt_handler
+#     lw      s1, 44(sp)
+#     #csrw    mepc, s1   ## change mepc somehow so it doesn't go in infinite loop
+#     lw      gp,40(sp)
+#     lw	    ra,36(sp)
+#     lw	    t0,32(sp)
+#     lw	    t1,28(sp)
+#     lw	    t2,24(sp)
+#     lw	    a0,20(sp)
+#     lw	    a1,16(sp)
+#     lw	    a2,12(sp)
+#     lw	    a3,8(sp)
+#     lw	    a4,4(sp)
+#     lw	    a5,0(sp)
+#     addi    sp,sp,40
+#     mret
 hardware_interrupt:
     csrr    ra,mscratch
-    addi	  sp,sp,-48
-    csrr    s1,mepc
-    sw      s1,44(sp)
-    mv      a5, s1
+    addi	sp,sp,-48
+    
+    sw	    ra,36(sp)
+    csrr    ra,mepc
+    sw      ra,44(sp)
     sw      gp,40(sp)
-    sw	    ra,36(sp) ## sp[36/4] = ra
     sw	    t0,32(sp)
     sw	    t1,28(sp)
     sw	    t2,24(sp)
@@ -40,9 +73,13 @@ hardware_interrupt:
     sw	    a3,8(sp)
     sw	    a4,4(sp)
     sw	    a5,0(sp)
+    .option push
+    .option norelax
+    la gp, __global_pointer$
+    .option pop
     call    c_interrupt_handler
-    lw      s1, 44(sp)
-    #csrw    mepc, s1   ## change mepc somehow so it doesn't go in infinite loop
+    lw      ra,44(sp)
+    csrw    mepc,ra
     lw      gp,40(sp)
     lw	    ra,36(sp)
     lw	    t0,32(sp)
@@ -54,7 +91,7 @@ hardware_interrupt:
     lw	    a3,8(sp)
     lw	    a4,4(sp)
     lw	    a5,0(sp)
-    addi    sp,sp,40
+    addi    sp,sp,48
     mret
 
 enter_cartridge:
