@@ -1,6 +1,6 @@
 #include "RVCOS.h"
 
-const SColor RVCOPaletteDefaultColors[] = {
+const Palette RVCOPaletteDefaultColors = {
 {0x00, 0x00, 0x00, 0x00}, // Transparent
 {0x00, 0x00, 0x80, 0xFF}, // Maroon (SYSTEM)
 {0x00, 0x80, 0x00, 0xFF}, // Green (SYSTEM)

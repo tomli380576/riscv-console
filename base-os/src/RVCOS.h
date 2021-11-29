@@ -239,4 +239,12 @@ typedef struct
     TMemorySize bytes_left;
 } MemoryPoolController;
 
+typedef SColor Palette[256];
+
+typedef struct {
+  Palette* palette_arr;
+  uint32_t background_palette_count;
+  uint32_t sprite_palette_count;
+} PaletteController;
+
 #endif

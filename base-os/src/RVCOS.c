@@ -20,7 +20,8 @@ volatile SVideoControllerMode *ModeControl = (volatile SVideoControllerMode *)0x
 
 TCB** global_tcb_arr = NULL;
 MemoryPoolController* global_mem_pool_arr = NULL;  // TODO change the 10
-MUTEX** global_mutex_arr;  // each mutex is const size, consider using only 1 pointer
+MUTEX** global_mutex_arr = NULL;  // each mutex is const size, consider using only 1 pointer
+PaletteController global_palettes;
 
 uint32_t curr_available_mem_pool_index = 0;
 uint32_t curr_TCB_max_size = 256;
@@ -39,6 +40,18 @@ void ContextSwitch(volatile uint32_t** oldsp, volatile uint32_t* newsp);
 uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp);
 void CallUpcall(void *param, TUpcallPointer upcall, uint32_t *gp, uint32_t *sp);
 void InitPointers(void);
+
+// maps to the thread state diagram in project description
+// 7 actions, 6 states
+typedef enum { 
+  Create,
+  Activate,
+  Deactivate, // maps to the 'quantum expire' action, or 4
+  SelectToRun,
+  Terminate,
+  Unblock,
+  Block
+} ThreadActions;
 
 /**
  * @brief Thread Scheduler, only call this through timer interrupt OR thread
@@ -168,12 +181,129 @@ void resizeTCBArray() {
   global_tcb_arr = new_tcb_arr;
 }
 
+/**
+ * @brief
+ *
+ * @param sp sp with malloced space
+ * @param function
+ * @param param
+ * @param tp
+ * @return uint32_t* the initialized sp
+ */
+uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp) {
+  sp--;
+  *sp = (uint32_t)function;  // sw      ra,48(sp)
+  sp--;
+  *sp = tp;  // sw      tp,44(sp)
+  sp--;
+  *sp = 0;  // sw      t0,40(sp)
+  sp--;
+  *sp = 0;  // sw      t1,36(sp)
+  sp--;
+  *sp = 0;  // sw      t2,32(sp)
+  sp--;
+  *sp = 0;  // sw      s0,28(sp)
+  sp--;
+  *sp = 0;  // sw      s1,24(sp)
+  sp--;
+  *sp = param;  // sw      a0,20(sp)
+  sp--;
+  *sp = 0;  // sw      a1,16(sp)
+  sp--;
+  *sp = 0;  // sw      a2,12(sp)
+  sp--;
+  *sp = 0;  // sw      a3,8(sp)
+  sp--;
+  *sp = 0;  // sw      a4,4(sp)
+  sp--;
+  *sp = 0;  // sw      a5,0(sp)
+  return sp;
+}
+
+/**
+ * @brief Prevents the interrupt handler from calling scheduler when PQ aren't
+ * ready
+ *
+ * @return uint32_t
+ */
+uint32_t getPQReady() { return PQ_ready; }
+
+/**
+ * @brief From Discussion code
+ * 
+ */
+void InitPointers(void){
+    for(int Index = 0; Index < 4; Index++){
+        BackgroundPalettes[Index] = (volatile SColor *)(0x500FC000 + 256 * sizeof(SColor) * Index);
+        SpritePalettes[Index] = (volatile SColor *)(0x500FD000 + 256 * sizeof(SColor) * Index);
+    }
+    for(int Index = 0; Index < 5; Index++){
+        BackgroundData[Index] = (volatile uint8_t *)(0x50000000 + 512 * 288 * Index);
+    }
+    for(int Index = 0; Index < 64; Index++){
+        LargeSpriteData[Index] = (volatile uint8_t *)(0x500B4000 + 64 * 64 * Index);
+    }
+    for(int Index = 0; Index < 128; Index++){
+        SmallSpriteData[Index] = (volatile uint8_t *)(0x500F4000 + 16 * 16 * Index);
+    }
+}
+
+TThreadState getNextThreadState(TThreadState curr_state, ThreadActions action){
+  switch (curr_state)
+  {
+  case RVCOS_THREAD_STATE_CREATED: {
+    if (action == Activate) {
+      return RVCOS_THREAD_STATE_READY;
+    }
+    break;
+  }
+  case RVCOS_THREAD_STATE_READY: {
+    switch (action) {
+      case SelectToRun: return RVCOS_THREAD_STATE_RUNNING;
+      case Terminate: return RVCOS_THREAD_STATE_DEAD;
+    }
+    break;
+  }
+  case RVCOS_THREAD_STATE_RUNNING: {
+    switch (action) {
+      case Deactivate: return RVCOS_THREAD_STATE_READY;
+      case Terminate: return RVCOS_THREAD_STATE_DEAD;
+      case Block: return RVCOS_THREAD_STATE_WAITING;
+    }
+    break;
+  }
+  case RVCOS_THREAD_STATE_DEAD: {
+    if (action == Activate) {
+      return RVCOS_THREAD_STATE_READY;
+    }
+    break;
+  }
+  case RVCOS_THREAD_STATE_WAITING: {
+    switch (action) {
+      case Unblock: return RVCOS_THREAD_STATE_READY;
+      case Terminate: return RVCOS_THREAD_STATE_DEAD;
+    }
+  }
+  default:
+    break;
+  }
+}
+
+// ----- Begin RVC Functions -----
+
+/**
+ * @brief Initializes the threading system
+ * 
+ * @param gp global pointer of OS
+ * @return TStatus 
+ */
 TStatus RVCInitialize(uint32_t* gp) {
   if (!gp) {
     return RVCOS_STATUS_ERROR_INVALID_STATE;
   }
   main_gp = gp;
 
+  //writeInt(Create);
   global_tcb_arr = malloc(sizeof(TCB*) * curr_TCB_max_size);
   for (uint32_t i = 0; i < 256; i++) {
     global_tcb_arr[i] = NULL;
@@ -210,6 +340,12 @@ TStatus RVCInitialize(uint32_t* gp) {
   return RVCOS_STATUS_SUCCESS;
 }
 
+/**
+ * @brief Deletes a thread
+ * 
+ * @param thread id of the thread to delete
+ * @return TStatus 
+ */
 TStatus RVCThreadDelete(TThreadID thread) {
   if (!global_tcb_arr[thread]) {
     return RVCOS_STATUS_ERROR_INVALID_ID;
@@ -237,7 +373,6 @@ TStatus RVCThreadDelete(TThreadID thread) {
  * @param tid thread id pointer from main to save out tid
  * @return TStatus
  */
-
 TStatus RVCThreadCreate(TThreadEntry entry, void* param, TMemorySize memsize,
                         TThreadPriority prio, TThreadIDRef tid) {
   if (!entry || !tid) {
@@ -508,6 +643,12 @@ TStatus RVCThreadWait(TThreadID thread, TThreadReturnRef returnref,
 
 TStatus RVCThreadSleep(TTick tick) { return RVCOS_STATUS_SUCCESS; }
 
+/**
+ * @brief Gets the current tick interval
+ * 
+ * @param tickmsref out param
+ * @return TStatus 
+ */
 TStatus RVCTickMS(uint32_t* tickmsref) {
   if (tickmsref) {
     *tickmsref = 5;
@@ -519,7 +660,16 @@ TStatus RVCTickMS(uint32_t* tickmsref) {
   return RVCOS_STATUS_SUCCESS;
 }
 
+/**
+ * @brief Gets the number of ticks passes since boot
+ * 
+ * @param tickref out param
+ * @return TStatus 
+ */
 TStatus RVCTickCount(TTickRef tickref) {
+
+  writeInt(getNextThreadState(RVCOS_THREAD_STATE_CREATED, Activate));
+
   if (tickref) {
     *tickref = TIME_REG / 5;
     return RVCOS_STATUS_SUCCESS;
@@ -795,7 +945,7 @@ TStatus RVCMutexRelease(TMutexID mutex) {
   return RVCOS_STATUS_SUCCESS;
 }
 
-TStatus RVCChangeVideoMode(TVideoMode mode){
+TStatus RVCChangeVideoMode(TVideoMode mode) {
   if (mode != RVCOS_VIDEO_MODE_TEXT && mode != RVCOS_VIDEO_MODE_GRAPHICS){
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
@@ -803,71 +953,115 @@ TStatus RVCChangeVideoMode(TVideoMode mode){
   return RVCOS_STATUS_SUCCESS;
 }
 
-
-
 /**
- * @brief
- *
- * @param sp sp with malloced space
- * @param function
- * @param param
- * @param tp
- * @return uint32_t* the initialized sp
- */
-uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp) {
-  sp--;
-  *sp = (uint32_t)function;  // sw      ra,48(sp)
-  sp--;
-  *sp = tp;  // sw      tp,44(sp)
-  sp--;
-  *sp = 0;  // sw      t0,40(sp)
-  sp--;
-  *sp = 0;  // sw      t1,36(sp)
-  sp--;
-  *sp = 0;  // sw      t2,32(sp)
-  sp--;
-  *sp = 0;  // sw      s0,28(sp)
-  sp--;
-  *sp = 0;  // sw      s1,24(sp)
-  sp--;
-  *sp = param;  // sw      a0,20(sp)
-  sp--;
-  *sp = 0;  // sw      a1,16(sp)
-  sp--;
-  *sp = 0;  // sw      a2,12(sp)
-  sp--;
-  *sp = 0;  // sw      a3,8(sp)
-  sp--;
-  *sp = 0;  // sw      a4,4(sp)
-  sp--;
-  *sp = 0;  // sw      a5,0(sp)
-  return sp;
-}
-/**
- * @brief Prevents the interrupt handler from calling scheduler when PQ aren't
- * ready
- *
- * @return uint32_t
- */
-uint32_t getPQReady() { return PQ_ready; }
-
-
-/**
- * @brief From Discussion code
+ * @brief Calls the upcall when video is done rendering
+ * use this in the C_interrupt_handler
  * 
+ * @param upcall function to call when video renders
+ * @param param params of the upcall
+ * @return TStatus 
  */
-void InitPointers(void){
-    for(int Index = 0; Index < 4; Index++){
-        BackgroundPalettes[Index] = (volatile SColor *)(0x500FC000 + 256 * sizeof(SColor) * Index);
-        SpritePalettes[Index] = (volatile SColor *)(0x500FD000 + 256 * sizeof(SColor) * Index);
-    }
-    for(int Index = 0; Index < 5; Index++){
-        BackgroundData[Index] = (volatile uint8_t *)(0x50000000 + 512 * 288 * Index);
-    }
-    for(int Index = 0; Index < 64; Index++){
-        LargeSpriteData[Index] = (volatile uint8_t *)(0x500B4000 + 64 * 64 * Index);
-    }
-    for(int Index = 0; Index < 128; Index++){
-        SmallSpriteData[Index] = (volatile uint8_t *)(0x500F4000 + 16 * 16 * Index);
-    }
+TStatus RVCSetVideoUpcall(TThreadEntry upcall, void *param) {
+
+
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Creates a graphics buffer of the given type, give back a id to gidref
+ * 
+ * @param type type of buffer
+ * @param gidref the generated buffer id
+ * @return TStatus 
+ */
+TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref) {
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Delete a graphics buffer tracked by gid
+ * 
+ * @param gid id of the buffer to delete
+ * @return TStatus 
+ */
+TStatus RVCGraphicDelete(TGraphicID gid) {
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Marks a buffer as active
+ * 
+ * @param gid id of the buffer to activate
+ * @param pos position
+ * @param dim dimension
+ * @param pid the palette to use for this buffer
+ * @return TStatus 
+ */
+TStatus RVCGraphicActivate(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensionsRef dim, TPaletteID pid){
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Deactivates a buffer
+ * 
+ * @param gid id of the buffer to deactivate
+ * @return TStatus 
+ */
+TStatus RVCGraphicDeactivate(TGraphicID gid){
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Draw the contents in a buffer to the video memory
+ * 
+ * @param gid buffer to draw
+ * @param pos 
+ * @param dim 
+ * @param src 
+ * @param srcwidth 
+ * @return TStatus 
+ */
+TStatus RVCGraphicDraw(TGraphicID gid, SGraphicPositionRef pos,
+                        SGraphicDimensionsRef dim, TPaletteIndexRef src, uint32_t srcwidth){
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Creates a palette
+ * 
+ * @param pidref the generated palette id
+ * @return TStatus 
+ */
+TStatus RVCPaletteCreate(TPaletteIDRef pidref){
+  // init palette controller here
+  // if (global_palettes.palette_arr == NULL) {
+  //   global_palettes.palette_arr = malloc(sizeof(Palette) * 8);
+  //   global_palettes.background_palette_count = 0;
+  // }
+
+
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Deletes a palette
+ * 
+ * @param pid id of palette to delete
+ * @return TStatus 
+ */
+TStatus RVCPaletteDelete(TPaletteID pid){
+  return RVCOS_STATUS_SUCCESS;
+}
+
+/**
+ * @brief Updates a palette //?
+ * 
+ * @param pid 
+ * @param cols 
+ * @param offset 
+ * @param count 
+ * @return TStatus 
+ */
+TStatus RVCPaletteUpdate(TPaletteID pid, SColorRef cols, TPaletteIndex offset, uint32_t count){
+  return RVCOS_STATUS_SUCCESS;
 }
