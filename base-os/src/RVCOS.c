@@ -28,6 +28,7 @@ volatile uint32_t running_thread_id = 1;
 uint32_t call_on_other_gp(void* param, TEntry entry, uint32_t* gp);
 void ContextSwitch(volatile uint32_t** oldsp, volatile uint32_t* newsp);
 uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp);
+void CallUpcall(void *param, TUpcallPointer upcall, uint32_t *gp, uint32_t *sp);
 
 
 /**

@@ -56,10 +56,18 @@ typedef uint32_t TThreadState, * TThreadStateRef;
 typedef char TTextCharacter, * TTextCharacterRef;
 typedef uint32_t TMemoryPoolID, * TMemoryPoolIDRef;
 typedef uint32_t TMutexID, * TMutexIDRef, TMutexOwner, TMutexState; // State: 1 = unlocked, 0 = locked
+typedef uint32_t TVideoMode, *TVideoModeRef;
+typedef uint32_t TGraphicID, *TGraphicIDRef;
+typedef uint32_t TGraphicType, *TGraphicTypeRef;
+typedef uint32_t TPaletteID, *TPaletteIDRef;
+typedef uint8_t TPaletteIndex, *TPaletteIndexRef;
 
 typedef uint32_t(*TEntry)(uint32_t param);
 
 typedef TThreadReturn(*TThreadEntry)(void*);
+
+typedef void (*TFunctionPointer)(void);
+typedef void (*TUpcallPointer)(void *param);
 
 typedef struct
 {
@@ -73,6 +81,38 @@ typedef struct
     uint32_t DButton4 : 1;   // 1 bit field
     uint32_t DReserved : 24; // 24 bit field
 } SControllerStatus, * SControllerStatusRef;
+
+
+typedef struct{
+    uint32_t DLeft:1;
+    uint32_t DUp:1;
+    uint32_t DDown:1;
+    uint32_t DRight:1;
+    uint32_t DButton1:1;
+    uint32_t DButton2:1;
+    uint32_t DButton3:1;
+    uint32_t DButton4:1;
+    uint32_t DReserved:24;
+} SControllerStatus, *SControllerStatusRef;
+
+typedef struct{
+    int32_t DXPosition;
+    int32_t DYPosition;
+    uint32_t DZPosition;
+} SGraphicPosition, *SGraphicPositionRef;
+
+typedef struct{
+    uint32_t DWidth;
+    uint32_t DHeight;
+} SGraphicDimensions, *SGraphicDimensionsRef;
+
+typedef struct{
+    uint32_t DBlue : 8;
+    uint32_t DGreen : 8;
+    uint32_t DRed : 8;
+    uint32_t DAlpha : 8;
+} SColor, *SColorRef;
+
 
 typedef char Byte;
 
@@ -107,6 +147,19 @@ TStatus RVCMutexRelease(TMutexID mutex);
 
 TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize);
 TStatus RVCReadController(SControllerStatusRef statusref);
+
+TStatus RVCChangeVideoMode(TVideoMode mode);
+TStatus RVCSetVideoUpcall(TThreadEntry upcall, void *param);
+
+TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref);
+TStatus RVCGraphicDelete(TGraphicID gid);
+TStatus RVCGraphicActivate(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensionsRef dim, TPaletteID pid);
+TStatus RVCGraphicDeactivate(TGraphicID gid);
+TStatus RVCGraphicDraw(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensionsRef dim, TPaletteIndexRef src, uint32_t srcwidth);
+
+TStatus RVCPaletteCreate(TPaletteIDRef pidref);
+TStatus RVCPaletteDelete(TPaletteID pid);
+TStatus RVCPaletteUpdate(TPaletteID pid, SColorRef cols, TPaletteIndex offset, uint32_t count);
 
 /**
  * Helper functions
