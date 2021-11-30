@@ -37,23 +37,24 @@ void WriteInt(int val) {
 }
 
 int main() {
-  uint32_t time = -1;
-  WriteString("time is: ");
-  RVCTickCount(&time);
-  WriteInt(time);
-  WriteString("\n");
+  // uint32_t time = -1;
+  // WriteString("time is: ");
+  // RVCTickCount(&time);
+  // WriteInt(time);
+  // WriteString("\n");
 
-  SControllerStatus ControllerStatus;
+  // SControllerStatus ControllerStatus;
 
-  while (1) {
-    RVCReadController(&ControllerStatus);
-    if (ControllerStatus.DRight) {
-      break;
-    }
-  }
+  // while (1) {
+  //   RVCReadController(&ControllerStatus);
+  //   if (ControllerStatus.DRight) {
+  //     break;
+  //   }
+  // }
 
-  WriteString("time is: ");
-  RVCTickCount(&time);
-  WriteInt(time);
+  // WriteString("time is: ");
+  // RVCTickCount(&time);
+  // WriteInt(time);
+  RVCPaletteDelete(1);// has the test() funtion right now
   return 0;
 }
