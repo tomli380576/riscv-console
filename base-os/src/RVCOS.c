@@ -126,7 +126,11 @@ void writeInt(uint32_t val) {
 void idleFunction() {
   writeString("Entered Idle\n");
   asm volatile("csrci mstatus, 0x8");  // enables interrupts
-  while (1);
+  while (1) {
+    // TODO do some check here to see if all threads are done
+
+    ;
+  }
 }
 
 uint32_t getNextAvailableTCBIndex() {
@@ -144,7 +148,7 @@ uint32_t getNextAvailableMemPoolIndex() {
 }
 
 uint32_t getNextAvailableMUTEXIndex() {
-  for (uint32_t i = 0; i < 1024; i++) { // Arbitrary 1024
+  for (uint32_t i = 0; i < 1024; i++) {  // Arbitrary 1024
     if (!global_mutex_arr[i]) {
       return i;
     }
@@ -253,7 +257,7 @@ void InitPointers(void) {
  * @param action the action that the thread received
  * @return TThreadState
  */
-TThreadState getNextThreadState(TThreadID tid, ThreadActions action) {
+TThreadState getNextThreadState(const TThreadID tid, const ThreadActions action) {
   const TThreadState curr_state = global_tcb_arr[tid]->state;
 
   switch (curr_state) {
@@ -411,15 +415,7 @@ TStatus RVCThreadCreate(TThreadEntry entry, void* param, TMemorySize memsize, TT
     global_tcb_arr[*tid] = curr_thread_tcb;
   }
 
-  // writeInt(prio);
-  // writeString(" to enq\n");
   enqueue(getPQByPrioNum(prio), *tid);
-
-  writeString("initial entry: ");
-  writeInt(curr_thread_tcb->entry);
-  writeString("\n");
-  writeInt(global_tcb_arr[*tid]->entry);
-  writeString("\n");
 
   return RVCOS_STATUS_SUCCESS;
 }
