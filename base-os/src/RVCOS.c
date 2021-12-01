@@ -9,13 +9,14 @@ const uint32_t MAX_NUM_OF_BUFFERS = 5 + 64 + 128;
 const uint32_t MAX_NUM_OF_PALETTES = 4;
 volatile uint32_t* main_gp = 0;
 volatile uint32_t PQ_ready = 0;
+volatile uint32_t graphics_initialized = 0;
 
-// Final ViewModel that gets send to VRAM
+// Actual VRAM
 volatile uint8_t* BackgroundData[5];  // Each element is a pointer to a bitmap
 volatile uint8_t* LargeSpriteData[64];
 volatile uint8_t* SmallSpriteData[128];
 
-// System controls, gets send to the hardware
+// Actual system buffer, gets send to the hardware
 volatile SColor* BackgroundPalettes[4];
 volatile SColor* SpritePalettes[4];
 volatile SBackgroundControl* BackgroundControls = (volatile SBackgroundControl*)0x500FF100;
@@ -27,6 +28,7 @@ TCB** global_tcb_arr = NULL;
 MemoryPoolController* global_mem_pool_arr = NULL;  // TODO change the 10
 MUTEX** global_mutex_arr = NULL;
 Buffer** global_graphic_buffer_arr = NULL;
+Palette** global_palette_arr = NULL;
 
 uint32_t curr_available_mem_pool_index = 0;
 uint32_t curr_TCB_max_size = 256;
@@ -44,9 +46,7 @@ uint32_t call_on_other_gp(void* param, TEntry entry, uint32_t* gp);
 void ContextSwitch(volatile uint32_t** oldsp, volatile uint32_t* newsp);
 uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp);
 void CallUpcall(void* param, TUpcallPointer upcall, uint32_t* gp, uint32_t* sp);
-void InitPointers(void);
-
-void test();
+void initPointers(void);
 
 /**
  * @brief Thread Scheduler, only call this through timer interrupt OR thread
@@ -133,7 +133,7 @@ uint32_t getNextAvailableMemPoolIndex() {
   return curr_available_mem_pool_index - 1;
 }
 
-uint32_t getNextIndexOf(void** arr, uint32_t size) {
+int32_t getNextIndexOf(void** arr, uint32_t size) {
   for (uint32_t i = 0; i < size; i++) {
     if (!arr[i]) {  // if the curr slot is empty
       return i;
@@ -216,7 +216,7 @@ uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp) 
 uint32_t getPQReady() { return PQ_ready; }
 
 /**
- * @brief From Discussion code
+ * @brief From Discussion code, inits the data pointers so the system VRAM can get the data
  *
  */
 void initPointers(void) {
@@ -291,6 +291,41 @@ TThreadState getNextThreadState(const TThreadID tid, const ThreadActions action)
       return RVCOS_THREAD_STATE_DEAD;  // ! Assumes something is bad, halt the thread
       break;
   }
+}
+
+TStatus sendBufferToVRAM(TGraphicID gid) {
+  if (!global_graphic_buffer_arr[gid]) {
+    writeString("bad buffer\n");
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+
+  Buffer* buffer_to_draw = global_graphic_buffer_arr[gid];
+
+  switch (buffer_to_draw->type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      uint32_t z_index = buffer_to_draw->background_control->DZ;
+      memcpy((void*)BackgroundData[z_index], buffer_to_draw->sprite_data, 512 * 288);
+      BackgroundControls[z_index] = *buffer_to_draw->background_control;
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      uint32_t z_index = 0;  // ? What's the z here
+      memcpy((void*)BackgroundData[z_index], buffer_to_draw->sprite_data, 64 * 64);
+      LargeSpriteControls[z_index] = *buffer_to_draw->large_sprite_control;
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      uint32_t z_index = buffer_to_draw->small_sprite_control->DZ;
+      memcpy((void*)SmallSpriteData[z_index], buffer_to_draw->sprite_data, 16 * 16);
+      SmallSpriteControls[z_index] = *buffer_to_draw->small_sprite_control;
+      break;
+    }
+    default: {
+      break;
+    }
+  }
+
+  return RVCOS_STATUS_SUCCESS;
 }
 
 // ----- Begin RVC Functions -----
@@ -931,7 +966,7 @@ TStatus RVCChangeVideoMode(TVideoMode mode) {
   if (mode != RVCOS_VIDEO_MODE_TEXT && mode != RVCOS_VIDEO_MODE_GRAPHICS) {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
-  ModeControl->DMode ^= 1;
+  ModeControl->DMode ^= mode;
   return RVCOS_STATUS_SUCCESS;
 }
 
@@ -957,23 +992,19 @@ TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref) {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
 
-  /**
-   *
-   * Init pointers
-   * Load default palette
-   * do the global buffer array manipulation stuff
-   *
-   */
-
-  initPointers();
-  memcpy((void*)BackgroundPalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
-  memcpy((void*)SpritePalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
+  if (!graphics_initialized) {
+    initPointers();
+    memcpy((void*)BackgroundPalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
+    memcpy((void*)SpritePalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
+    graphics_initialized = 1;
+  }
 
   if (!global_graphic_buffer_arr) {
     global_graphic_buffer_arr = malloc(sizeof(Buffer*) * MAX_NUM_OF_BUFFERS);
   }
 
-  uint32_t new_id = getNextIndexOf(global_graphic_buffer_arr, MAX_NUM_OF_BUFFERS);
+  int32_t new_id = getNextIndexOf(global_graphic_buffer_arr, MAX_NUM_OF_BUFFERS);
+
   if (new_id > -1) {
     *gidref = new_id;
     global_graphic_buffer_arr[new_id] = malloc(sizeof(Buffer));
@@ -981,6 +1012,29 @@ TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref) {
     global_graphic_buffer_arr[new_id]->activated = 0;
   } else {
     return RVCOS_STATUS_FAILURE;
+  }
+
+  Buffer* new_buffer = global_graphic_buffer_arr[new_id];
+  switch (type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      new_buffer->sprite_data = malloc(sizeof(uint8_t) * 512 * 288);
+      new_buffer->background_control = malloc(sizeof(SBackgroundControl));
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      new_buffer->sprite_data = malloc(sizeof(uint8_t) * 64 * 64);
+      new_buffer->large_sprite_control = malloc(sizeof(SLargeSpriteControl));
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      new_buffer->sprite_data = malloc(sizeof(uint8_t) * 16 * 16);
+      new_buffer->small_sprite_control = malloc(sizeof(SSmallSpriteControl));
+      break;
+    }
+    default: {
+      return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+      break;
+    }
   }
 
   return RVCOS_STATUS_SUCCESS;
@@ -1019,8 +1073,55 @@ TStatus RVCGraphicActivate(TGraphicID gid, SGraphicPositionRef pos, SGraphicDime
                            TPaletteID pid) {
   // State change, mark buffer as activate
   // Draw
+  if (!global_palette_arr[pid]) {
+    pid = 0;
+  }
+
   Buffer* buffer_to_activate = global_graphic_buffer_arr[gid];
   buffer_to_activate->activated = 1;
+  uint32_t temp = dim->DWidth;
+  writeString("activate? ");
+  writeInt(buffer_to_activate->activated);
+
+  switch (buffer_to_activate->type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      *buffer_to_activate->background_control =
+          (SBackgroundControl){.DXOffset = pos->DXPosition + 512,
+                               .DYOffset = pos->DYPosition + 288,
+                               .DZ = pos->DZPosition,
+                               .DPalette = pid};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      *buffer_to_activate->large_sprite_control =
+          (SLargeSpriteControl){.DXOffset = pos->DXPosition + 64,
+                                .DYOffset = pos->DYPosition + 64,
+                                .DWidth = dim->DWidth - 33,
+                                .DHeight = dim->DHeight - 33,
+                                .DPalette = pid};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      *buffer_to_activate->small_sprite_control = (SSmallSpriteControl){
+          .DPalette = pid,
+          .DXOffset = pos->DXPosition + 16,
+          .DYOffset = pos->DYPosition + 16,
+          .DWidth = dim->DWidth - 1,
+          .DHeight = dim->DHeight - 1,
+          .DZ = pos->DZPosition,
+      };
+
+      break;
+    }
+    default: {
+      writeString("bad type to activate\n");
+      return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+      break;
+    }
+  }
+
+  sendBufferToVRAM(gid);
+  writeString("good activate\n");
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -1039,7 +1140,7 @@ TStatus RVCGraphicDeactivate(TGraphicID gid) {
 }
 
 /**
- * @brief Draw the contents in a buffer to the video memory
+ * @brief Enables a buffer with the given content
  *
  * @param gid buffer to draw
  * @param pos
@@ -1048,8 +1149,40 @@ TStatus RVCGraphicDeactivate(TGraphicID gid) {
  * @param srcwidth
  * @return TStatus
  */
+
 TStatus RVCGraphicDraw(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensionsRef dim,
                        TPaletteIndexRef src, uint32_t srcwidth) {
+  Buffer* target_buf = global_graphic_buffer_arr[gid];
+
+  switch (target_buf->type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      *target_buf->background_control = (SBackgroundControl){
+          .DXOffset = pos->DXPosition, .DYOffset = pos->DYPosition, .DZ = pos->DZPosition};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      *target_buf->large_sprite_control = (SLargeSpriteControl){.DXOffset = pos->DXPosition + 64,
+                                                                .DYOffset = pos->DYPosition + 64,
+                                                                .DWidth = dim->DWidth - 33,
+                                                                .DHeight = dim->DHeight - 33};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      *target_buf->small_sprite_control = (SSmallSpriteControl){.DXOffset = pos->DXPosition + 16,
+                                                                .DYOffset = pos->DYPosition + 16,
+                                                                .DZ = pos->DZPosition,
+                                                                .DHeight = dim->DHeight - 1,
+                                                                .DWidth = dim->DWidth - 1};
+      break;
+    }
+    default: {
+      writeString("bad type to activate\n");
+      return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+      break;
+    }
+  }
+  memcpy(target_buf->sprite_data + (pos->DYPosition * srcwidth), src, srcwidth);
+
   return RVCOS_STATUS_SUCCESS;
 }
 
@@ -1060,11 +1193,18 @@ TStatus RVCGraphicDraw(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensio
  * @return TStatus
  */
 TStatus RVCPaletteCreate(TPaletteIDRef pidref) {
-  // init palette controller here
-  // if (global_palettes.palette_arr == NULL) {
-  //   global_palettes.palette_arr = malloc(sizeof(Palette) * 8);
-  //   global_palettes.background_palette_count = 0;
-  // }
+  if (global_palette_arr == NULL) {
+    global_palette_arr = malloc(sizeof(Palette*) * MAX_NUM_OF_PALETTES);
+    global_palette_arr[0] = &RVCOPaletteDefaultColors;
+  }
+
+  int32_t new_id = getNextIndexOf(global_palette_arr, MAX_NUM_OF_PALETTES);
+  if (new_id > -1) {
+    global_palette_arr[new_id] = malloc(sizeof(Palette));
+    *pidref = new_id;
+  } else {
+    return RVCOS_STATUS_FAILURE;
+  }
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -1077,38 +1217,32 @@ TStatus RVCPaletteCreate(TPaletteIDRef pidref) {
  */
 TStatus RVCPaletteDelete(TPaletteID pid) {
   writeString("palette delete");
-  test();
   return RVCOS_STATUS_SUCCESS;
 }
 
 /**
  * @brief Updates a palette //?
  *
- * @param pid
- * @param cols
- * @param offset
+ * @param pid the palette to overwrite
+ * @param cols the palette to read data from
+ * @param offset first color to update in target palette?
  * @param count
  * @return TStatus
  */
 TStatus RVCPaletteUpdate(TPaletteID pid, SColorRef cols, TPaletteIndex offset, uint32_t count) {
+  if (!global_palette_arr[pid]) {
+    return RVCOS_STATUS_ERROR_INVALID_ID;
+  }
+  if (!cols) {
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+  if (offset + count >= 256 || offset + count < 0) {
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+  // ! Palette needs a controller to check if its being used
+
+  Palette* target_palette = global_palette_arr[pid];
+  memcpy(target_palette, cols, count * sizeof(SColor));  // ? is this correct?
+
   return RVCOS_STATUS_SUCCESS;
-}
-
-void test() {
-  initPointers();
-
-  // Set default palettes
-  memcpy((void*)BackgroundPalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
-  memcpy((void*)SpritePalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
-
-  // set all of the first backgroud pixels to be color from palette[13]
-  // memset(pointer_to_set, value, size_in_bytes)
-  memset((void*)BackgroundData[0], 13, 512 * 288);
-  BackgroundControls[0].DPalette = 0;
-  BackgroundControls[0].DXOffset = 512;
-  BackgroundControls[0].DYOffset = 288;
-  BackgroundControls[0].DZ = 0;
-
-  RVCChangeVideoMode(RVCOS_VIDEO_MODE_GRAPHICS);
-  //while(1);
 }

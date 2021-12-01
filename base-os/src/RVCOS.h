@@ -255,8 +255,12 @@ typedef SColor Palette[256];
 typedef struct {
   uint32_t activated;
   TGraphicType type;
-  
-  //SBackgroundControl 
+
+  uint8_t* sprite_data;
+
+  SSmallSpriteControl* small_sprite_control;
+  SLargeSpriteControl* large_sprite_control;
+  SBackgroundControl* background_control; // switch case by type when rendering
 } Buffer;
 
 #endif

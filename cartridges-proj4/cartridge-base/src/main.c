@@ -55,6 +55,7 @@ int main() {
   // WriteString("time is: ");
   // RVCTickCount(&time);
   // WriteInt(time);
-  RVCPaletteDelete(1);// has the test() funtion right now
+  TGraphicID id = -1;
+  RVCGraphicCreate(RVCOS_GRAPHIC_TYPE_FULL, &id);
   return 0;
 }
