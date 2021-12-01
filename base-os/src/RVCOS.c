@@ -838,14 +838,12 @@ TStatus RVCMutexCreate(TMutexIDRef mutexref) {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
 
-  // Need to check this and return failure if it fails
   MUTEX* curr_mutex = malloc(sizeof(MUTEX));
   if (!curr_mutex) {
     return RVCOS_STATUS_ERROR_INSUFFICIENT_RESOURCES;
   }
 
   curr_mutex->state = RVCOS_MUTEX_STATE_UNLOCKED;
-  //*mutexref = getNextAvailableMUTEXIndex();
   *mutexref = getNextIndexOf(global_mutex_arr, 1024);  // 1024 is arbitrary
   curr_mutex->mutex_id = *mutexref;
   global_mutex_arr[*mutexref] = curr_mutex;
@@ -898,6 +896,7 @@ TStatus RVCMutexAcquire(TMutexID mutex, TTick timeout) {
   } else if (timeout == RVCOS_TIMEOUT_INFINITE) {
     uint32_t thread_id = global_mutex_arr[mutex]->owner;  // block thread until mutex is acquired
     global_tcb_arr[thread_id]->state == RVCOS_THREAD_STATE_WAITING;
+    enqueue(global_mutex_arr[mutex]->held_by, thread_id);
 
     return RVCOS_STATUS_SUCCESS;
   } else {
@@ -921,8 +920,8 @@ TStatus RVCMutexRelease(TMutexID mutex) {
   }
 
   global_mutex_arr[mutex]->owner = NULL;
-  /*may cause another higher priority thread to be scheduled
-  if it acquires the newly released mutex. */
+  dequeue(global_mutex_arr[mutex]->held_by, running_thread_id);
+  schedule();
 
   return RVCOS_STATUS_SUCCESS;
 }
