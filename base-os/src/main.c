@@ -27,8 +27,6 @@ int main() {
   while (1) {
     if (CART_STAT_REG & 0x1) {
       enter_cartridge();
-      RVCChangeVideoMode(RVCOS_VIDEO_MODE_TEXT);
-      //writeString("back to OS\n");
       while (CART_STAT_REG & 0x1)
         ;  // wait for the cartridge to be removed
     }
@@ -182,7 +180,6 @@ void c_syscall_handler(uint32_t p1, uint32_t p2, uint32_t p3, uint32_t p4, uint3
       RVCPaletteUpdate(p1, p2, p3, p4);
       break;
     }
-
     default:
       break;
   }
