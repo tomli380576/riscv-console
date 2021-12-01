@@ -69,7 +69,7 @@ typedef uint32_t TThreadState, *TThreadStateRef;
 typedef char TTextCharacter, *TTextCharacterRef;
 typedef uint32_t TMemoryPoolID, *TMemoryPoolIDRef;
 typedef uint32_t TMutexID, *TMutexIDRef, TMutexOwner,
-    TMutexState;  // State: 1 = unlocked, 0 = locked
+    TMutexState, TMutexHeldArray;  // State: 1 = unlocked, 0 = locked
 typedef uint32_t TVideoMode, *TVideoModeRef;
 typedef uint32_t TGraphicID, *TGraphicIDRef;
 typedef uint32_t TGraphicType, *TGraphicTypeRef;
@@ -234,6 +234,7 @@ typedef struct {
   TMutexIDRef mutex_ref;
   TMutexOwner owner;
   TMutexState state;
+  TMutexHeldArray *held_by[256]; //Arbitrary 256
 } MUTEX;
 
 typedef struct _MemoryChunk {
