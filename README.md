@@ -1,30 +1,10 @@
 
-# Student Names and IDs:
-
-**Zhongning Li** 917626797
-
-**Alexander Hernes** 912304658
-
-## Naming Conventions
-```c
-int variable_name
-void functionName() {}
-typedef TypeName
-#define MACRO_NAME
-```
-
-
-<details>
-<summary>Docs from original repo</summary>
 
 # RISC-V Console Simulator
 
 This project is a simulator for a hypothetical RISC-V based game console. The repository provides Dockerfiles to build the necessary RISC-V toolchain for firmware and/or "game" development. The simulator was developed for use in UC Davis' Computer Science courses; however, any other educators are highly encouraged to take this repository and modify it to meet the needs of your class.
 
 ## Table of Contents
-
-- [Student Names and IDs:](#student-names-and-ids)
-  - [Naming Conventions](#naming-conventions)
 - [RISC-V Console Simulator](#risc-v-console-simulator)
   - [Table of Contents](#table-of-contents)
   - [Getting Started](#getting-started)
@@ -81,4 +61,3 @@ The simulator can also be run in debug mode by adding the `-d` option to the `ri
 ![](docs/img/console-screenshot-debug.png)
 
 The `Run` button will run the system until it is clicked again, or until a breakpoint is hit. The `Step` button will execute a single instruction, and the `Clear` button will clear all breakpoints. Breakpoints can be toggled by double clicking the associated instruction. The `FW`, `CTR`, `CS`, and `VID` buttons will jump to the Firmware, Cartridge, Chipset, and Video Memory base addresses. The `GP` and `SP` buttons jump to the memory specified by the `gp` and `sp` registers.
-</details>
