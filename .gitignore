@@ -41,3 +41,4 @@ bin/
 runsim.sh
 discussion*
 .DS_Store
+*.tgz

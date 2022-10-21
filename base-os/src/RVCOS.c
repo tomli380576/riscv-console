@@ -1,16 +1,22 @@
 #include "RVCOS.h"
 
 #include "esc_codes.h"
+#include "graphics_constants.h"
 #include "queues.h"
 
-volatile char* TEXT_VIDEO_MEMORY = (volatile char*)(0x50000000 + 0xFE800);
+volatile char* VIDEO_MEMORY = (volatile char*)(0x50000000 + 0xFE800);
+const uint32_t MAX_NUM_OF_BUFFERS = 5 + 64 + 128;
+const uint32_t MAX_NUM_OF_PALETTES = 4;
 volatile uint32_t* main_gp = 0;
 volatile uint32_t PQ_ready = 0;
+volatile uint32_t graphics_initialized = 0;
 
-volatile uint8_t* BackgroundData[5];
+// Actual VRAM
+volatile uint8_t* BackgroundData[5];  // Each element is a pointer to a bitmap
 volatile uint8_t* LargeSpriteData[64];
 volatile uint8_t* SmallSpriteData[128];
 
+// Actual system buffer, gets send to the hardware
 volatile SColor* BackgroundPalettes[4];
 volatile SColor* SpritePalettes[4];
 volatile SBackgroundControl* BackgroundControls = (volatile SBackgroundControl*)0x500FF100;
@@ -20,8 +26,9 @@ volatile SVideoControllerMode* ModeControl = (volatile SVideoControllerMode*)0x5
 
 TCB** global_tcb_arr = NULL;
 MemoryPoolController* global_mem_pool_arr = NULL;  // TODO change the 10
-MUTEX** global_mutex_arr = NULL;  // each mutex is const size, consider using only 1 pointer
-PaletteController global_palettes;
+MUTEX** global_mutex_arr = NULL;
+Buffer** global_graphic_buffer_arr = NULL;
+Palette** global_palette_arr = NULL;
 
 uint32_t curr_available_mem_pool_index = 0;
 uint32_t curr_TCB_max_size = 256;
@@ -39,19 +46,7 @@ uint32_t call_on_other_gp(void* param, TEntry entry, uint32_t* gp);
 void ContextSwitch(volatile uint32_t** oldsp, volatile uint32_t* newsp);
 uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp);
 void CallUpcall(void* param, TUpcallPointer upcall, uint32_t* gp, uint32_t* sp);
-void InitPointers(void);
-
-// maps to the thread state diagram in project description
-// 7 actions, 6 states
-typedef enum {
-  Create,
-  Activate,
-  Deactivate,  // maps to the 'quantum expire' action, or 4
-  SelectToRun,
-  Terminate,
-  Unblock,
-  BlockOrWait
-} ThreadActions;
+void initPointers(void);
 
 /**
  * @brief Thread Scheduler, only call this through timer interrupt OR thread
@@ -63,36 +58,21 @@ void schedule() {
 
   if (high_prio->size > 0) {
     dequeue(high_prio, &new_id);
-    writeString("high deq: ");
   } else if (med_prio->size > 0) {
     dequeue(med_prio, &new_id);
-    writeString("med deq: ");
   } else if (low_prio->size > 0) {
     dequeue(low_prio, &new_id);
-    writeString("low deq: ");
   } else {
     dequeue(idle_prio, &new_id);
-    writeString("idle deq: ");
   }
-  writeInt(new_id);
-  writeString("\n");
 
   if (new_id >= 0 && new_id != running_thread_id) {
-    writeString("try to switch, the new id is: ");
-    writeInt(new_id);
-    writeString("\n");
-
-    writeString("the old id is: ");
-    writeInt(old_id);
-    writeString("\n");
-
     running_thread_id = new_id;
     ContextSwitch(&(global_tcb_arr[old_id]->sp), global_tcb_arr[new_id]->sp);
     if (new_id == 0) {
       RVCThreadActivate(0);
     }
   }
-  writeString("back\n");
 }
 
 void threadSkeleton() {
@@ -100,7 +80,6 @@ void threadSkeleton() {
   global_tcb_arr[running_thread_id]->state = RVCOS_THREAD_STATE_RUNNING;
   uint32_t ret_val = call_on_other_gp(global_tcb_arr[running_thread_id]->param,
                                       global_tcb_arr[running_thread_id]->entry, main_gp);
-  writeString("came back\n");  // The thread did finish
   RVCThreadTerminate(running_thread_id, ret_val);
 }
 
@@ -124,7 +103,6 @@ void writeInt(uint32_t val) {
 }
 
 void idleFunction() {
-  writeString("Entered Idle\n");
   asm volatile("csrci mstatus, 0x8");  // enables interrupts
   while (1) {
     // TODO do some check here to see if all threads are done
@@ -133,23 +111,14 @@ void idleFunction() {
   }
 }
 
-uint32_t getNextAvailableTCBIndex() {
-  for (uint32_t i = 0; i < curr_TCB_max_size; i++) {
-    if (!global_tcb_arr[i]) {  // if the curr slot is empty
-      return i;
-    }
-  }
-  return -1;  // no available slots
-}
-
 uint32_t getNextAvailableMemPoolIndex() {
   curr_available_mem_pool_index++;
   return curr_available_mem_pool_index - 1;
 }
 
-uint32_t getNextAvailableMUTEXIndex() {
-  for (uint32_t i = 0; i < 1024; i++) {  // Arbitrary 1024
-    if (!global_mutex_arr[i]) {
+int32_t getNextIndexOf(void** arr, uint32_t size) {
+  for (uint32_t i = 0; i < size; i++) {
+    if (!arr[i]) {  // if the curr slot is empty
       return i;
     }
   }
@@ -230,10 +199,10 @@ uint32_t* initStack(uint32_t* sp, TEntry function, uint32_t param, uint32_t tp) 
 uint32_t getPQReady() { return PQ_ready; }
 
 /**
- * @brief From Discussion code
+ * @brief From Discussion code, inits the data pointers so the system VRAM can get the data
  *
  */
-void InitPointers(void) {
+void initPointers(void) {
   for (int Index = 0; Index < 4; Index++) {
     BackgroundPalettes[Index] = (volatile SColor*)(0x500FC000 + 256 * sizeof(SColor) * Index);
     SpritePalettes[Index] = (volatile SColor*)(0x500FD000 + 256 * sizeof(SColor) * Index);
@@ -305,6 +274,40 @@ TThreadState getNextThreadState(const TThreadID tid, const ThreadActions action)
       return RVCOS_THREAD_STATE_DEAD;  // ! Assumes something is bad, halt the thread
       break;
   }
+}
+
+TStatus sendBufferToVRAM(TGraphicID gid) {
+  if (!global_graphic_buffer_arr[gid]) {
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+
+  Buffer* buffer_to_draw = global_graphic_buffer_arr[gid];
+
+  switch (buffer_to_draw->type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      uint32_t z_index = buffer_to_draw->background_control->DZ;
+      memcpy((void*)BackgroundData[z_index], buffer_to_draw->sprite_data, 512 * 288);
+      BackgroundControls[z_index] = *buffer_to_draw->background_control;
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      uint32_t z_index = 0;  // ? What's the z here
+      memcpy((void*)BackgroundData[z_index], buffer_to_draw->sprite_data, 64 * 64);
+      LargeSpriteControls[z_index] = *buffer_to_draw->large_sprite_control;
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      uint32_t z_index = buffer_to_draw->small_sprite_control->DZ;
+      memcpy((void*)SmallSpriteData[z_index], buffer_to_draw->sprite_data, 16 * 16);
+      SmallSpriteControls[z_index] = *buffer_to_draw->small_sprite_control;
+      break;
+    }
+    default: {
+      break;
+    }
+  }
+
+  return RVCOS_STATUS_SUCCESS;
 }
 
 // ----- Begin RVC Functions -----
@@ -405,11 +408,11 @@ TStatus RVCThreadCreate(TThreadEntry entry, void* param, TMemorySize memsize, TT
   curr_thread_tcb->entry = entry;
   curr_thread_tcb->param = param;
 
-  *tid = getNextAvailableTCBIndex();
+  *tid = getNextIndexOf(global_tcb_arr, curr_TCB_max_size);
 
   if (*tid == -1) {
     resizeTCBArray();
-    *tid = getNextAvailableTCBIndex();
+    *tid = getNextIndexOf(global_tcb_arr, curr_TCB_max_size);
   } else {
     curr_thread_tcb->thread_id = *tid;
     global_tcb_arr[*tid] = curr_thread_tcb;
@@ -552,7 +555,7 @@ TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize) {
           case 2: {
             RVCWriteText("\b ", 2);
             if (last_write_pos == 0) {
-              TEXT_VIDEO_MEMORY[0] = ' ';
+              VIDEO_MEMORY[0] = ' ';
               last_write_pos = 64;
             } else {
               last_write_pos = (physical_write_pos + 63) % MAX_VRAM_INDEX;
@@ -580,7 +583,7 @@ TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize) {
           case 6: {
             writeString("2: Erase screen, leave cursor");
             for (int h = 0; h < MAX_VRAM_INDEX; h++) {
-              TEXT_VIDEO_MEMORY[h] = '\0';
+              VIDEO_MEMORY[h] = '\0';
             }
             RVCWriteText("X", 1);
             break;
@@ -601,7 +604,7 @@ TStatus RVCWriteText(const TTextCharacter* buffer, TMemorySize writesize) {
       physical_write_pos = physical_write_pos - 2 > 0 ? physical_write_pos - 2
                                                       : 0;  // make sure writepos is always >=0
     }
-    TEXT_VIDEO_MEMORY[physical_write_pos++] = buffer[j];
+    VIDEO_MEMORY[physical_write_pos++] = buffer[j];
   }
 
   // change this line to change the behavior of writing to a filled screen/
@@ -852,14 +855,13 @@ TStatus RVCMutexCreate(TMutexIDRef mutexref) {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
 
-  // Need to check this and return failure if it fails
   MUTEX* curr_mutex = malloc(sizeof(MUTEX));
   if (!curr_mutex) {
     return RVCOS_STATUS_ERROR_INSUFFICIENT_RESOURCES;
   }
 
   curr_mutex->state = RVCOS_MUTEX_STATE_UNLOCKED;
-  *mutexref = getNextAvailableMUTEXIndex();
+  *mutexref = getNextIndexOf(global_mutex_arr, 1024);  // 1024 is arbitrary
   curr_mutex->mutex_id = *mutexref;
   global_mutex_arr[*mutexref] = curr_mutex;
   return RVCOS_STATUS_SUCCESS;
@@ -911,6 +913,7 @@ TStatus RVCMutexAcquire(TMutexID mutex, TTick timeout) {
   } else if (timeout == RVCOS_TIMEOUT_INFINITE) {
     uint32_t thread_id = global_mutex_arr[mutex]->owner;  // block thread until mutex is acquired
     global_tcb_arr[thread_id]->state == RVCOS_THREAD_STATE_WAITING;
+    enqueue(global_mutex_arr[mutex]->held_by, thread_id);
 
     return RVCOS_STATUS_SUCCESS;
   } else {
@@ -934,8 +937,8 @@ TStatus RVCMutexRelease(TMutexID mutex) {
   }
 
   global_mutex_arr[mutex]->owner = NULL;
-  /*may cause another higher priority thread to be scheduled
-  if it acquires the newly released mutex. */
+  dequeue(global_mutex_arr[mutex]->held_by, running_thread_id);
+  schedule();
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -944,7 +947,7 @@ TStatus RVCChangeVideoMode(TVideoMode mode) {
   if (mode != RVCOS_VIDEO_MODE_TEXT && mode != RVCOS_VIDEO_MODE_GRAPHICS) {
     return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
   }
-  ModeControl->DMode ^= 1;
+  ModeControl->DMode ^= mode;
   return RVCOS_STATUS_SUCCESS;
 }
 
@@ -965,7 +968,58 @@ TStatus RVCSetVideoUpcall(TThreadEntry upcall, void* param) { return RVCOS_STATU
  * @param gidref the generated buffer id
  * @return TStatus
  */
-TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref) { return RVCOS_STATUS_SUCCESS; }
+TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref) {
+  if (!gidref) {
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+
+  if (!graphics_initialized) {
+    initPointers();
+    memcpy((void*)BackgroundPalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
+    memcpy((void*)SpritePalettes[0], RVCOPaletteDefaultColors, 256 * sizeof(SColor));
+    graphics_initialized = 1;
+  }
+
+  if (!global_graphic_buffer_arr) {
+    global_graphic_buffer_arr = malloc(sizeof(Buffer*) * MAX_NUM_OF_BUFFERS);
+  }
+
+  int32_t new_id = getNextIndexOf(global_graphic_buffer_arr, MAX_NUM_OF_BUFFERS);
+
+  if (new_id > -1) {
+    *gidref = new_id;
+    global_graphic_buffer_arr[new_id] = malloc(sizeof(Buffer));
+    global_graphic_buffer_arr[new_id]->type = type;
+    global_graphic_buffer_arr[new_id]->activated = 0;
+  } else {
+    return RVCOS_STATUS_FAILURE;
+  }
+
+  Buffer* new_buffer = global_graphic_buffer_arr[new_id];
+  switch (type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      new_buffer->sprite_data = malloc(sizeof(uint8_t) * 512 * 288);
+      new_buffer->background_control = malloc(sizeof(SBackgroundControl));
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      new_buffer->sprite_data = malloc(sizeof(uint8_t) * 64 * 64);
+      new_buffer->large_sprite_control = malloc(sizeof(SLargeSpriteControl));
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      new_buffer->sprite_data = malloc(sizeof(uint8_t) * 16 * 16);
+      new_buffer->small_sprite_control = malloc(sizeof(SSmallSpriteControl));
+      break;
+    }
+    default: {
+      return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+      break;
+    }
+  }
+
+  return RVCOS_STATUS_SUCCESS;
+}
 
 /**
  * @brief Delete a graphics buffer tracked by gid
@@ -973,10 +1027,22 @@ TStatus RVCGraphicCreate(TGraphicType type, TGraphicIDRef gidref) { return RVCOS
  * @param gid id of the buffer to delete
  * @return TStatus
  */
-TStatus RVCGraphicDelete(TGraphicID gid) { return RVCOS_STATUS_SUCCESS; }
+TStatus RVCGraphicDelete(TGraphicID gid) {
+  if (gid >= 0 && gid < MAX_NUM_OF_BUFFERS) {
+    Buffer* buffer_to_delete = global_graphic_buffer_arr[gid];
+    if (buffer_to_delete != NULL) {
+      free(buffer_to_delete);
+      return RVCOS_STATUS_SUCCESS;
+    } else {
+      return RVCOS_STATUS_FAILURE;
+    }
+  }
+
+  return RVCOS_STATUS_FAILURE;
+}
 
 /**
- * @brief Marks a buffer as active
+ * @brief Marks a buffer as active, and draw the contents
  *
  * @param gid id of the buffer to activate
  * @param pos position
@@ -986,19 +1052,71 @@ TStatus RVCGraphicDelete(TGraphicID gid) { return RVCOS_STATUS_SUCCESS; }
  */
 TStatus RVCGraphicActivate(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensionsRef dim,
                            TPaletteID pid) {
+  // State change, mark buffer as activate
+  // Draw
+  if (!global_palette_arr[pid]) {
+    pid = 0;
+  }
+
+  Buffer* buffer_to_activate = global_graphic_buffer_arr[gid];
+  buffer_to_activate->activated = 1;
+
+  switch (buffer_to_activate->type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      *buffer_to_activate->background_control =
+          (SBackgroundControl){.DXOffset = pos->DXPosition + 512,
+                               .DYOffset = pos->DYPosition + 288,
+                               .DZ = pos->DZPosition,
+                               .DPalette = pid};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      *buffer_to_activate->large_sprite_control =
+          (SLargeSpriteControl){.DXOffset = pos->DXPosition + 64,
+                                .DYOffset = pos->DYPosition + 64,
+                                .DWidth = dim->DWidth - 33,
+                                .DHeight = dim->DHeight - 33,
+                                .DPalette = pid};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      *buffer_to_activate->small_sprite_control = (SSmallSpriteControl){
+          .DPalette = pid,
+          .DXOffset = pos->DXPosition + 16,
+          .DYOffset = pos->DYPosition + 16,
+          .DWidth = dim->DWidth - 1,
+          .DHeight = dim->DHeight - 1,
+          .DZ = pos->DZPosition,
+      };
+
+      break;
+    }
+    default: {
+      return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+      break;
+    }
+  }
+
+  sendBufferToVRAM(gid);
+
   return RVCOS_STATUS_SUCCESS;
 }
 
 /**
- * @brief Deactivates a buffer
+ * @brief Deactivates a buffer, redraw the screen so buffer content doesn't show
  *
  * @param gid id of the buffer to deactivate
  * @return TStatus
  */
-TStatus RVCGraphicDeactivate(TGraphicID gid) { return RVCOS_STATUS_SUCCESS; }
+TStatus RVCGraphicDeactivate(TGraphicID gid) {
+  Buffer* buffer_to_deactivate = global_graphic_buffer_arr[gid];
+  buffer_to_deactivate->activated = 0;
+
+  return RVCOS_STATUS_SUCCESS;
+}
 
 /**
- * @brief Draw the contents in a buffer to the video memory
+ * @brief Enables a buffer with the given content
  *
  * @param gid buffer to draw
  * @param pos
@@ -1007,8 +1125,39 @@ TStatus RVCGraphicDeactivate(TGraphicID gid) { return RVCOS_STATUS_SUCCESS; }
  * @param srcwidth
  * @return TStatus
  */
+
 TStatus RVCGraphicDraw(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensionsRef dim,
                        TPaletteIndexRef src, uint32_t srcwidth) {
+  Buffer* target_buf = global_graphic_buffer_arr[gid];
+
+  switch (target_buf->type) {
+    case RVCOS_GRAPHIC_TYPE_FULL: {
+      *target_buf->background_control = (SBackgroundControl){
+          .DXOffset = pos->DXPosition, .DYOffset = pos->DYPosition, .DZ = pos->DZPosition};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_LARGE: {
+      *target_buf->large_sprite_control = (SLargeSpriteControl){.DXOffset = pos->DXPosition + 64,
+                                                                .DYOffset = pos->DYPosition + 64,
+                                                                .DWidth = dim->DWidth - 33,
+                                                                .DHeight = dim->DHeight - 33};
+      break;
+    }
+    case RVCOS_GRAPHIC_TYPE_SMALL: {
+      *target_buf->small_sprite_control = (SSmallSpriteControl){.DXOffset = pos->DXPosition + 16,
+                                                                .DYOffset = pos->DYPosition + 16,
+                                                                .DZ = pos->DZPosition,
+                                                                .DHeight = dim->DHeight - 1,
+                                                                .DWidth = dim->DWidth - 1};
+      break;
+    }
+    default: {
+      return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+      break;
+    }
+  }
+  memcpy(target_buf->sprite_data + (pos->DYPosition * srcwidth), src, srcwidth);
+
   return RVCOS_STATUS_SUCCESS;
 }
 
@@ -1019,11 +1168,18 @@ TStatus RVCGraphicDraw(TGraphicID gid, SGraphicPositionRef pos, SGraphicDimensio
  * @return TStatus
  */
 TStatus RVCPaletteCreate(TPaletteIDRef pidref) {
-  // init palette controller here
-  // if (global_palettes.palette_arr == NULL) {
-  //   global_palettes.palette_arr = malloc(sizeof(Palette) * 8);
-  //   global_palettes.background_palette_count = 0;
-  // }
+  if (global_palette_arr == NULL) {
+    global_palette_arr = malloc(sizeof(Palette*) * MAX_NUM_OF_PALETTES);
+    global_palette_arr[0] = &RVCOPaletteDefaultColors;
+  }
+
+  int32_t new_id = getNextIndexOf(global_palette_arr, MAX_NUM_OF_PALETTES);
+  if (new_id > -1) {
+    global_palette_arr[new_id] = malloc(sizeof(Palette));
+    *pidref = new_id;
+  } else {
+    return RVCOS_STATUS_FAILURE;
+  }
 
   return RVCOS_STATUS_SUCCESS;
 }
@@ -1034,17 +1190,34 @@ TStatus RVCPaletteCreate(TPaletteIDRef pidref) {
  * @param pid id of palette to delete
  * @return TStatus
  */
-TStatus RVCPaletteDelete(TPaletteID pid) { return RVCOS_STATUS_SUCCESS; }
+TStatus RVCPaletteDelete(TPaletteID pid) {
+  free(global_palette_arr[pid]);
+  return RVCOS_STATUS_SUCCESS;
+}
 
 /**
- * @brief Updates a palette //?
+ * @brief Updates a palette 
  *
- * @param pid
- * @param cols
- * @param offset
+ * @param pid the palette to overwrite
+ * @param cols the palette to read data from
+ * @param offset first color to update in target palette?
  * @param count
  * @return TStatus
  */
 TStatus RVCPaletteUpdate(TPaletteID pid, SColorRef cols, TPaletteIndex offset, uint32_t count) {
+  if (!global_palette_arr[pid]) {
+    return RVCOS_STATUS_ERROR_INVALID_ID;
+  }
+  if (!cols) {
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+  if (offset + count >= 256 || offset + count < 0) {
+    return RVCOS_STATUS_ERROR_INVALID_PARAMETER;
+  }
+  // ! Palette needs a controller to check if its being used
+
+  Palette* target_palette = global_palette_arr[pid];
+  memcpy(target_palette, cols, count * sizeof(SColor));  // ? is this correct?
+
   return RVCOS_STATUS_SUCCESS;
 }

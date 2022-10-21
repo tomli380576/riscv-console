@@ -60,7 +60,6 @@ hardware_interrupt:
     addi    sp,sp,48
     mret
 
-
 enter_cartridge:
     addi    sp,sp,-12 # 3 args from somewhere
     la      a5,saved_sp
